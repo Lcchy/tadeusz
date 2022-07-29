@@ -1,10 +1,23 @@
-#N canvas 950 21 960 980 12;
+#N canvas 1910 32 1920 2079 12;
 #X msg 158 123 connect 127.0.0.1 34254;
 #X msg 424 127 1;
 #X msg 537 138 0;
 #X obj 221 265 netsend -u -b;
-#X obj 398 208 oscformat -f i tadeusz;
+#X obj 398 208 oscformat -f i tadeusz/status;
+#X obj 666 134 pack i i;
+#X obj 728 32 hsl 128 15 0 500000 0 0 empty empty empty -2 -8 0 10
+#fcfcfc #000000 #000000 0 1;
+#X obj 634 92 hsl 128 15 0 500000 0 0 empty empty empty -2 -8 0 10
+#fcfcfc #000000 #000000 0 1;
+#X obj 725 52 t b i;
+#X obj 648 200 oscformat -f i /tadeusz/params;
 #X connect 0 0 3 0;
 #X connect 1 0 4 0;
 #X connect 2 0 4 0;
 #X connect 4 0 3 0;
+#X connect 5 0 9 0;
+#X connect 6 0 8 0;
+#X connect 7 0 5 0;
+#X connect 8 0 5 0;
+#X connect 8 1 5 1;
+#X connect 9 0 3 0;

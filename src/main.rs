@@ -1,3 +1,8 @@
+use anyhow::Result;
+use jack::{Client, ClientOptions};
+use rosc::OscMessage;
+use std::fs::File;
+use std::path::Path;
 use std::{
     cmp::min,
     io,
@@ -5,12 +10,6 @@ use std::{
     sync::{Arc, RwLock},
     thread,
 };
-
-use anyhow::Result;
-use jack::{Client, ClientOptions};
-use rosc::OscMessage;
-use std::fs::File;
-use std::path::Path;
 
 /// Should be enough,See https://osc-dev.create.ucsb.narkive.com/TyotlluU/osc-udp-packet-sizes-for-interoperability
 /// and https://www.music.mcgill.ca/~gary/306/week9/osc.html
@@ -26,15 +25,51 @@ struct SampleBuffer {
     l_buffer: Vec<f32>,
 }
 
+struct GrainParams {
+    /// Mark the params as recently changed
+    updated: bool,
+    len: usize,
+    /// Sample index to start from
+    start: usize,
+    /// Cycles per second, Hz
+    speed: f32,
+}
+
 struct Params {
     status: bool,
+    grain: GrainParams,
 }
 
 fn main() -> Result<()> {
+    // Set up jack ports
+    let (jclient, _) = Client::new("tadeusz_jack", ClientOptions::NO_START_SERVER)?;
+    // let in_l_port = jclient
+    //     .register_port("tadeusz_in_l", jack::AudioIn::default())
+    //     .unwrap();
+    // let in_r_port = jclient
+    //     .register_port("tadeusz_in_r", jack::AudioIn::default())
+    //     .unwrap();
+    let mut out_l_port = jclient
+        .register_port("tadeusz_out_l", jack::AudioOut::default())
+        .unwrap();
+    let mut out_r_port = jclient
+        .register_port("tadeusz_out_r", jack::AudioOut::default())
+        .unwrap();
+
     //Load audio file into sample buffer
-    // TODO compare input file bitrate with jack server
     let mut inp_file = File::open(Path::new("Plate1.wav"))?;
-    let (_, data) = wav::read(&mut inp_file)?;
+    let (header, data) = wav::read(&mut inp_file)?;
+    let sample_rate = jclient.sample_rate();
+    if sample_rate != header.sampling_rate as usize {
+        println!(
+            "Sample rate of file ({}) does not match the one from Jack ({})",
+            header.sampling_rate, sample_rate
+        );
+        // Err(Error::msg(
+        //     "Sample rate of file does not match the one from Jack",
+        // ))?;
+    }
+
     let bits: Vec<f32> = data
         .as_sixteen()
         .unwrap()
@@ -51,23 +86,16 @@ fn main() -> Result<()> {
     };
 
     // Create the shared parameters instance
-    let params = Params { status: false };
+    let params = Params {
+        status: false,
+        grain: GrainParams {
+            updated: false,
+            start: 0,
+            len: b.len,
+            speed: 1.,
+        },
+    };
     let params_arc = Arc::new(RwLock::new(params));
-
-    // Set up jack ports
-    let (jclient, _) = Client::new("tadeusz_jack", ClientOptions::NO_START_SERVER)?;
-    // let in_l_port = jclient
-    //     .register_port("tadeusz_in_l", jack::AudioIn::default())
-    //     .unwrap();
-    // let in_r_port = jclient
-    //     .register_port("tadeusz_in_r", jack::AudioIn::default())
-    //     .unwrap();
-    let mut out_l_port = jclient
-        .register_port("tadeusz_out_l", jack::AudioOut::default())
-        .unwrap();
-    let mut out_r_port = jclient
-        .register_port("tadeusz_out_r", jack::AudioOut::default())
-        .unwrap();
 
     // Define the Jack process (to refactor)
     let params_ref = params_arc.clone();
@@ -79,20 +107,17 @@ fn main() -> Result<()> {
 
         let params_read = params_ref.read().unwrap();
 
-        let new_head = (b.head + out_l_buff.len()) % b.len;
-        if b.head + out_l_buff.len() > b.len {
-            // Wrapping around the sample buffer
-            let (h, t) = out_l_buff.split_at_mut(b.len - b.head);
-            h.copy_from_slice(&b.l_buffer[b.head..b.len]);
-            t.copy_from_slice(&b.l_buffer[0..new_head]);
-
-            let (h, t) = out_r_buff.split_at_mut(b.len - b.head);
-            h.copy_from_slice(&b.r_buffer[b.head..b.len]);
-            t.copy_from_slice(&b.r_buffer[0..new_head]);
-        } else {
-            out_l_buff.copy_from_slice(&b.l_buffer[b.head..b.head + out_l_buff.len()]);
-            out_r_buff.copy_from_slice(&b.r_buffer[b.head..b.head + out_r_buff.len()]);
-        };
+        //TODO refactor
+        // Relying on buffer L R being same length
+        let out_buff_len = out_l_buff.len();
+        let grain_len = params_read.grain.len;
+        for i in 0..out_buff_len {
+            out_l_buff[i] =
+                b.l_buffer[(params_read.grain.start + (b.head + i) % grain_len) % b.len];
+            out_r_buff[i] =
+                b.r_buffer[(params_read.grain.start + (b.head + i) % grain_len) % b.len];
+        }
+        let new_head = (b.head + out_buff_len) % grain_len + params_read.grain.start;
         b.head = new_head;
 
         if !params_read.status {
@@ -124,15 +149,35 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+// TODO should not be able to fail, remove unwraps and return error obj to be catched & printed
 fn osc_handling(osc_msg: OscMessage, params_ref: &Arc<RwLock<Params>>) {
-    if osc_msg.addr == "/tadeusz" {
-        let mut params_mut = params_ref.write().unwrap();
-        if let Some(status) = osc_msg.args[0].to_owned().int() {
-            (*params_mut).status = status == 1;
-            println!("Status set to {:?}", status == 1);
-        } else {
-            println!("OSC message arg is unrecognized.");
+    match osc_msg.addr.as_str() {
+        "/tadeusz/status" => {
+            if let Some(status) = osc_msg.args[0].to_owned().int() {
+                let mut params_mut = params_ref.write().unwrap();
+                params_mut.status = status == 1;
+                println!("Status set to {:?}", status == 1);
+            } else {
+                println!("OSC message argument is of wrong type.");
+            }
         }
+        "/tadeusz/params" => {
+            let mut params_mut = params_ref.write().unwrap();
+            if let Some(start) = osc_msg.args[0].to_owned().int()
+                && let Some(len) = osc_msg.args[1].to_owned().int() {
+                    if len > 0 {
+                        params_mut.grain.start = start as usize;
+                        params_mut.grain.len = len as usize;
+                        println!("Grain start set to {:?}", start);
+                        println!("Grain len set to {:?}", len);
+                    } else {
+                        println!("OSC len message argument cannot be 0.");
+                    }
+                }   else {
+                println!("OSC message argument is of wrong type.");
+            }
+        }
+        _ => println!("OSC message routing is unrecognized."),
     }
 }
 
@@ -146,7 +191,6 @@ fn osc_process_closure(
         loop {
             match udp_socket.recv(&mut rec_buffer) {
                 Ok(received) => {
-                    // println!("received {} bytes {:?}", received, &rec_buffer[..received]);
                     let (_, packet) =
                         if let Ok(v) = rosc::decoder::decode_udp(&rec_buffer[..received]) {
                             v

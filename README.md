@@ -1,5 +1,4 @@
-### Run on Fedora35
+### Run on Fedora36
 
-- Install `qjackctl` and start a jack server with it
-- Opt: Install `jack-audio-connection-kit-devel` as a dep for building
-- Warning: the jack server is incompatible with other audio routing, it takes over
+- Install `pipewire-jack-audio-connection-kit-devel` as a dep for building
+- Use `helvum` flatpak to route audio in pipewire
