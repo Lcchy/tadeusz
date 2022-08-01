@@ -78,7 +78,7 @@ fn main() -> Result<()> {
         .collect();
     // TODO wheres the stereo??
     let buffer_len = min(SAMPLE_BUFFER_MAX_LEN, bits.len());
-    let mut b = SampleBuffer {
+    let b = SampleBuffer {
         len: buffer_len,
         head: 0,
         r_buffer: bits[0..buffer_len].to_vec(),
@@ -95,10 +95,12 @@ fn main() -> Result<()> {
             speed: 1.,
         },
     };
+    let b_arc = Arc::new(RwLock::new(b));
     let params_arc = Arc::new(RwLock::new(params));
 
     // Define the Jack process (to refactor)
     let params_ref = params_arc.clone();
+    let b_ref = b_arc.clone();
     let jack_process = move |_: &jack::Client, ps: &jack::ProcessScope| -> jack::Control {
         let out_l_buff = out_l_port.as_mut_slice(ps);
         let out_r_buff = out_r_port.as_mut_slice(ps);
@@ -106,19 +108,18 @@ fn main() -> Result<()> {
         // let mut in_b_p = in_b.as_slice(ps).to_owned();
 
         let params_read = params_ref.read().unwrap();
+        let mut b_write = b_ref.write().unwrap();
 
-        //TODO refactor
         // Relying on buffer L R being same length
         let out_buff_len = out_l_buff.len();
         let grain_len = params_read.grain.len;
         for i in 0..out_buff_len {
-            out_l_buff[i] =
-                b.l_buffer[(params_read.grain.start + (b.head + i) % grain_len) % b.len];
-            out_r_buff[i] =
-                b.r_buffer[(params_read.grain.start + (b.head + i) % grain_len) % b.len];
+            out_l_buff[i] = b_write.l_buffer
+                [(params_read.grain.start + (b_write.head + i) % grain_len) % b_write.len];
+            out_r_buff[i] = b_write.r_buffer
+                [(params_read.grain.start + (b_write.head + i) % grain_len) % b_write.len];
         }
-        let new_head = (b.head + out_buff_len) % grain_len + params_read.grain.start;
-        b.head = new_head;
+        b_write.head = (b_write.head + out_buff_len) % grain_len;
 
         if !params_read.status {
             //             let null = vec![0f32; out_l_buff.len()];
@@ -135,7 +136,7 @@ fn main() -> Result<()> {
 
     // Start the OSC listening thread
     let udp_socket = UdpSocket::bind(format!("127.0.0.1:{}", OSC_PORT))?;
-    let osc_process = osc_process_closure(udp_socket, params_arc);
+    let osc_process = osc_process_closure(udp_socket, params_arc, b_arc);
     let osc_handler = thread::spawn(osc_process);
 
     // Wait for user input to quit
@@ -150,7 +151,11 @@ fn main() -> Result<()> {
 }
 
 // TODO should not be able to fail, remove unwraps and return error obj to be catched & printed
-fn osc_handling(osc_msg: OscMessage, params_ref: &Arc<RwLock<Params>>) {
+fn osc_handling(
+    osc_msg: OscMessage,
+    params_ref: &Arc<RwLock<Params>>,
+    buffer_ref: &Arc<RwLock<SampleBuffer>>,
+) {
     match osc_msg.addr.as_str() {
         "/tadeusz/status" => {
             if let Some(status) = osc_msg.args[0].to_owned().int() {
@@ -166,9 +171,10 @@ fn osc_handling(osc_msg: OscMessage, params_ref: &Arc<RwLock<Params>>) {
             if let Some(start) = osc_msg.args[0].to_owned().int()
                 && let Some(len) = osc_msg.args[1].to_owned().int() {
                     if len > 0 {
-                        params_mut.grain.start = start as usize;
-                        params_mut.grain.len = len as usize;
-                        println!("Grain start set to {:?}", start);
+                        let buffer_len = buffer_ref.read().unwrap().len;
+                        params_mut.grain.start = min(start as usize, buffer_len);
+                        params_mut.grain.len = min(len as usize, buffer_len);
+                        println!("Grain start set to {:?}", params_mut.grain.start);
                         println!("Grain len set to {:?}", len);
                     } else {
                         println!("OSC len message argument cannot be 0.");
@@ -185,6 +191,7 @@ fn osc_handling(osc_msg: OscMessage, params_ref: &Arc<RwLock<Params>>) {
 fn osc_process_closure(
     udp_socket: UdpSocket,
     params_ref: Arc<RwLock<Params>>,
+    buffer_ref: Arc<RwLock<SampleBuffer>>,
 ) -> impl FnOnce() -> Result<()> {
     move || {
         let mut rec_buffer = [0; OSC_BUFFER_LEN];
@@ -201,7 +208,7 @@ fn osc_process_closure(
                     match packet {
                         rosc::OscPacket::Message(msg) => {
                             println!("Received osc msg {:?}", msg);
-                            osc_handling(msg, &params_ref);
+                            osc_handling(msg, &params_ref, &buffer_ref);
                         }
                         rosc::OscPacket::Bundle(_) => unimplemented!(),
                     }
