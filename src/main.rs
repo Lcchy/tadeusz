@@ -1,6 +1,7 @@
 use anyhow::Result;
 use jack::{Client, ClientOptions};
 use rosc::OscMessage;
+use std::f32::consts::PI;
 use std::fs::File;
 use std::path::Path;
 use std::{
@@ -17,12 +18,21 @@ use std::{
 const OSC_BUFFER_LEN: usize = rosc::decoder::MTU;
 const OSC_PORT: &str = "34254";
 const SAMPLE_BUFFER_MAX_LEN: usize = 10 * 48000; // 10s
+const XFADE_LEN: usize = 150; // samples, ~2ms at 48khz
 
 // Write: -, Read: osc+jack
 struct SampleBuffer {
     len: usize,
-    r_buffer: Vec<f32>, // of length SAMPLE_BUFFER_MAX_LEN
+    /// Of length SAMPLE_BUFFER_MAX_LEN
+    r_buffer: Vec<f32>,    
     l_buffer: Vec<f32>,
+    /// Constant power xfade env for grain loop smoothing.
+    /// Of same length as samplefbuffer
+    /// Sin for XFADE_LEN, 1 after
+    xfade_in: Vec<f32>,
+    /// Cos for XFADE_LEN, 0 after
+    /// Of same length as samplefbuffer
+    xfade_out: Vec<f32>,
 }
 
 #[derive(Clone)]
@@ -76,18 +86,28 @@ fn main() -> Result<()> {
         // ))?;
     }
 
+    // TODO wheres the stereo??
     let bits: Vec<f32> = data
         .as_sixteen()
         .unwrap()
         .iter()
         .map(|&x| (x as f32) / 32768f32)
         .collect();
-    // TODO wheres the stereo??
+
+    // Compute cross fading env
+    // Relying on jack freq being 48khz for 2ms xfade
     let buffer_len = min(SAMPLE_BUFFER_MAX_LEN, bits.len());
+    let mut xfade_in: Vec<f32> = (0..XFADE_LEN).map(|i| (PI * i as f32 / 2. * XFADE_LEN as f32).sin()).collect::<Vec<f32>>();
+    let mut xfade_out: Vec<f32> = (0..XFADE_LEN).map(|i| (PI * i as f32 / 2. * XFADE_LEN as f32).cos()).collect();
+    xfade_in.resize(buffer_len, 1.);
+    xfade_out.resize(buffer_len, 0.);
+
     let buffer = SampleBuffer {
         len: buffer_len,
         r_buffer: bits[0..buffer_len].to_vec(),
         l_buffer: bits[0..buffer_len].to_vec(),
+        xfade_in,
+        xfade_out,
     };
 
     // Create the shared parameters instance
@@ -119,10 +139,34 @@ fn main() -> Result<()> {
         let out_buff_len = out_l_buff.len();
         let grain_len = grain_params_read.len;
         for i in 0..out_buff_len {
-            out_l_buff[i] = b_ref.l_buffer
-                [(grain_params_read.start + (params_ref.grain_head + i) % grain_len) % b_ref.len];
-            out_r_buff[i] = b_ref.r_buffer
-                [(grain_params_read.start + (params_ref.grain_head + i) % grain_len) % b_ref.len];
+            //TODO case when grain_len < XFADE_OUT
+            let grain_pos = params_ref.grain_head + i;
+            let buffer_pos = grain_params_read.start + grain_pos % grain_len;
+            // Stays at -1 until (end_of_grain - XFADE) is reached, wrapped
+            let xfade_pos = (grain_pos.saturating_sub(grain_len - XFADE_LEN)) % grain_len + b_ref.len - 1;
+
+            out_l_buff[i] = 
+            // Fade out from the end of the grain
+            // TODO could store last playes samples in a buffer of xfade_size to be used for fadeout? 
+            // TODO cut to 0 crossinng
+            b_ref.xfade_out[grain_pos % grain_len]
+                * b_ref.l_buffer[(buffer_pos + grain_len) % b_ref.len] + 
+            // Present grain
+                b_ref.xfade_in[grain_pos % grain_len]    *
+                    b_ref.l_buffer[buffer_pos % b_ref.len] 
+                    * b_ref.xfade_out[(xfade_pos as usize + 1) % b_ref.len]
+            // Fade in of next grain
+            + b_ref.xfade_in[xfade_pos as usize % b_ref.len] * b_ref.l_buffer[(b_ref.len + buffer_pos - grain_len) % b_ref.len];
+
+            // Same for R
+            out_r_buff[i] = 
+            b_ref.xfade_out[grain_pos % grain_len]
+                * b_ref.r_buffer[(buffer_pos + grain_len) % b_ref.len]
+                + b_ref.xfade_in[grain_pos % grain_len]
+                    * b_ref.r_buffer[buffer_pos % b_ref.len] * b_ref.xfade_out[(xfade_pos as usize + 1) % b_ref.len]
+            + b_ref.xfade_in[xfade_pos as usize % b_ref.len] * b_ref.r_buffer[(b_ref.len + buffer_pos - grain_len) % b_ref.len];
+
+
         }
         params_ref.grain_head = (params_ref.grain_head + out_buff_len) % grain_len;
 
@@ -170,13 +214,13 @@ fn osc_handling(osc_msg: &OscMessage, params: &Params, buffer: &SampleBuffer) {
             let mut grain_params_mut = params.grain.write().unwrap();
             if let Some(start) = osc_msg.args[0].to_owned().int()
                 && let Some(len) = osc_msg.args[1].to_owned().int() {
-                    if len > 0 {
+                    if len > XFADE_LEN  as i32{
                         grain_params_mut.start = min(start as usize, buffer.len);
                         grain_params_mut.len = min(len as usize, buffer.len);
                         println!("Grain start set to {:?}", grain_params_mut.start);
                         println!("Grain len set to {:?}", len);
                     } else {
-                        println!("OSC len message argument cannot be 0.");
+                        println!("OSC len message argument cannot be less than XFADE.");
                     }
                 }   else {
                 println!("OSC message argument is of wrong type.");
@@ -187,14 +231,11 @@ fn osc_handling(osc_msg: &OscMessage, params: &Params, buffer: &SampleBuffer) {
 }
 
 /// Returns a closure that runs the main osc receiving loop
-fn osc_process_closure<'a, 'b>(
+fn osc_process_closure(
     udp_socket: UdpSocket,
     params_ref: Params,
     buffer: Arc<SampleBuffer>,
-) -> impl FnOnce() -> Result<()> + 'b
-where
-    'a: 'b,
-{
+) -> impl FnOnce() -> Result<()> {
     move || {
         let mut rec_buffer = [0; OSC_BUFFER_LEN];
         loop {
