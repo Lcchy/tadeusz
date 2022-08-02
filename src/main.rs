@@ -1,7 +1,6 @@
-use anyhow::{Result, bail, };
+use anyhow::{bail, Result};
 use jack::{Client, ClientOptions};
 use rosc::OscMessage;
-use strum::EnumString;
 use std::f32::consts::PI;
 use std::fs::File;
 use std::path::Path;
@@ -13,6 +12,7 @@ use std::{
     sync::{Arc, RwLock},
     thread,
 };
+use strum::EnumString;
 
 /// Should be enough,See https://osc-dev.create.ucsb.narkive.com/TyotlluU/osc-udp-packet-sizes-for-interoperability
 /// and https://www.music.mcgill.ca/~gary/306/week9/osc.html
@@ -105,8 +105,12 @@ fn main() -> Result<()> {
 
     // Compute cross fading env
     let buffer_len = min(SAMPLE_BUFFER_MAX_LEN, bits.len());
-    let mut xfade_in: Vec<f32> = (0..XFADE_LEN).map(|i| (PI * i as f32 / 2. * XFADE_LEN as f32).sin()).collect::<Vec<f32>>();
-    let mut xfade_out: Vec<f32> = (0..XFADE_LEN).map(|i| (PI * i as f32 / 2. * XFADE_LEN as f32).cos()).collect();
+    let mut xfade_in: Vec<f32> = (0..XFADE_LEN)
+        .map(|i| (PI * i as f32 / 2. * XFADE_LEN as f32).sin())
+        .collect::<Vec<f32>>();
+    let mut xfade_out: Vec<f32> = (0..XFADE_LEN)
+        .map(|i| (PI * i as f32 / 2. * XFADE_LEN as f32).cos())
+        .collect();
     xfade_in.resize(buffer_len, 1.);
     xfade_out.resize(buffer_len, 0.);
 
@@ -151,52 +155,46 @@ fn main() -> Result<()> {
             let grain_pos = params_ref.grain_head + i;
             let buffer_pos = grain_params_read.start + grain_pos % grain_len;
             // Stays at -1 until (end_of_grain - XFADE) is reached, wrapped
-            let xfade_pos = (grain_pos.saturating_sub(grain_len - XFADE_LEN)) % grain_len + b_ref.len - 1;
+            let xfade_pos =
+                (grain_pos.saturating_sub(grain_len - XFADE_LEN)) % grain_len + b_ref.len - 1;
             let grain_status = &grain_params_read.status;
 
             match grain_status {
                 GrainStatus::XFade => {
-            out_l_buff[i] = 
-            // Fade out from the end of the grain
-            // TODO could store last played samples in a buffer of xfade_size to be used for fadeout? 
-            // TODO cut to 0 crossinng
-            b_ref.xfade_out[grain_pos % grain_len]
-                * b_ref.l_buffer[(buffer_pos + grain_len) % b_ref.len] + 
-            // Present grain
-                b_ref.xfade_in[grain_pos % grain_len]    *
-                    b_ref.l_buffer[buffer_pos % b_ref.len] 
-                    * b_ref.xfade_out[(xfade_pos as usize + 1) % b_ref.len]
-            // Fade in of next grain
-            + b_ref.xfade_in[xfade_pos as usize % b_ref.len] * b_ref.l_buffer[(b_ref.len + buffer_pos - grain_len) % b_ref.len];
+                    out_l_buff[i] =
+                        // Fade out from the end of the grain
+                        // TODO could store last played samples in a buffer of xfade_size to be used for fadeout? 
+                        // TODO cut to 0 crossinng
+                        b_ref.xfade_out[grain_pos % grain_len]
+                            * b_ref.l_buffer[(buffer_pos + grain_len) % b_ref.len] +
+                        // Present grain
+                        b_ref.xfade_in[grain_pos % grain_len]
+                            * b_ref.l_buffer[buffer_pos % b_ref.len]
+                            * b_ref.xfade_out[(xfade_pos as usize + 1) % b_ref.len]
+                        // Fade in of next grain
+                        + b_ref.xfade_in[xfade_pos as usize % b_ref.len] * b_ref.l_buffer[(b_ref.len + buffer_pos - grain_len) % b_ref.len];
 
-            // Same for R
-            out_r_buff[i] = 
-            b_ref.xfade_out[grain_pos % grain_len]
-                * b_ref.r_buffer[(buffer_pos + grain_len) % b_ref.len]
-                + b_ref.xfade_in[grain_pos % grain_len]
-                    * b_ref.r_buffer[buffer_pos % b_ref.len] * b_ref.xfade_out[(xfade_pos as usize + 1) % b_ref.len]
-            + b_ref.xfade_in[xfade_pos as usize % b_ref.len] * b_ref.r_buffer[(b_ref.len + buffer_pos - grain_len) % b_ref.len];
-            }
-                GrainStatus::On => { out_l_buff[i] = 
-   
+                    // Same for R
+                    out_r_buff[i] = b_ref.xfade_out[grain_pos % grain_len]
+                        * b_ref.r_buffer[(buffer_pos + grain_len) % b_ref.len]
+                        + b_ref.xfade_in[grain_pos % grain_len]
+                            * b_ref.r_buffer[buffer_pos % b_ref.len]
+                            * b_ref.xfade_out[(xfade_pos as usize + 1) % b_ref.len]
+                        + b_ref.xfade_in[xfade_pos as usize % b_ref.len]
+                            * b_ref.r_buffer[(b_ref.len + buffer_pos - grain_len) % b_ref.len];
+                }
+                GrainStatus::On => {
+                    out_l_buff[i] = b_ref.l_buffer[buffer_pos % b_ref.len];
 
-
-                            b_ref.l_buffer[buffer_pos % b_ref.len] ;
- 
-        
-                  
-                    out_r_buff[i] = 
-                  
-                        
-                            b_ref.r_buffer[buffer_pos % b_ref.len] ;},
+                    out_r_buff[i] = b_ref.r_buffer[buffer_pos % b_ref.len];
+                }
                 GrainStatus::Off => {
                     out_l_buff.fill(0.);
                     out_r_buff.fill(0.);
-                }, }
-
+                }
+            }
         }
         params_ref.grain_head = (params_ref.grain_head + out_buff_len) % grain_len;
-
 
         jack::Control::Continue
     };
@@ -221,27 +219,36 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn osc_handling(osc_msg: &OscMessage, params: &Params, buffer: &SampleBuffer) -> Result<()>{
+fn osc_handling(osc_msg: &OscMessage, params: &Params, buffer: &SampleBuffer) -> Result<()> {
     match osc_msg.addr.as_str() {
         "/tadeusz/status" => {
-            let status = osc_msg.args[0].to_owned().string().ok_or_else(||anyhow::format_err!("OSC status arg was not recognized."))?;
-                let mut grain_params_mut = params.grain.write().unwrap();
-                grain_params_mut.status = GrainStatus::from_str(&status)?;
-                println!("Grain Status set to {:?}", grain_params_mut.status);
+            let status = osc_msg.args[0]
+                .to_owned()
+                .string()
+                .ok_or_else(|| anyhow::format_err!("OSC status arg was not recognized."))?;
+            let mut grain_params_mut = params.grain.write().unwrap();
+            grain_params_mut.status = GrainStatus::from_str(&status)?;
+            println!("Grain Status set to {:?}", grain_params_mut.status);
         }
         "/tadeusz/params" => {
             let mut grain_params_mut = params.grain.write().unwrap();
-            let start = osc_msg.args[0].to_owned().int().ok_or_else(||anyhow::format_err!("OSC start arg was not recognized."))?;
-            let len = osc_msg.args[1].to_owned().int().ok_or_else(||anyhow::format_err!("OSC len arg was not recognized."))?;
+            let start = osc_msg.args[0]
+                .to_owned()
+                .int()
+                .ok_or_else(|| anyhow::format_err!("OSC start arg was not recognized."))?;
+            let len = osc_msg.args[1]
+                .to_owned()
+                .int()
+                .ok_or_else(|| anyhow::format_err!("OSC len arg was not recognized."))?;
 
-                    if len > XFADE_LEN  as i32 {
-                        grain_params_mut.start = min(start as usize, buffer.len);
-                        grain_params_mut.len = min(len as usize, buffer.len);
-                        println!("Grain start set to {:?}", grain_params_mut.start);
-                        println!("Grain len set to {:?}", len);
-                    } else {
-                        println!("OSC len message argument cannot be less than XFADE.");
-                    }
+            if len > XFADE_LEN as i32 {
+                grain_params_mut.start = min(start as usize, buffer.len);
+                grain_params_mut.len = min(len as usize, buffer.len);
+                println!("Grain start set to {:?}", grain_params_mut.start);
+                println!("Grain len set to {:?}", len);
+            } else {
+                println!("OSC len message argument cannot be less than XFADE.");
+            }
         }
         _ => bail!("OSC routing was not recognized"),
     }
