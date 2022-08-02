@@ -1,9 +1,11 @@
-use anyhow::Result;
+use anyhow::{Result, bail, };
 use jack::{Client, ClientOptions};
 use rosc::OscMessage;
+use strum::EnumString;
 use std::f32::consts::PI;
 use std::fs::File;
 use std::path::Path;
+use std::str::FromStr;
 use std::{
     cmp::min,
     io,
@@ -24,7 +26,7 @@ const XFADE_LEN: usize = 150; // samples, ~2ms at 48khz
 struct SampleBuffer {
     len: usize,
     /// Of length SAMPLE_BUFFER_MAX_LEN
-    r_buffer: Vec<f32>,    
+    r_buffer: Vec<f32>,
     l_buffer: Vec<f32>,
     /// Constant power xfade env for grain loop smoothing.
     /// Of same length as samplefbuffer
@@ -35,10 +37,17 @@ struct SampleBuffer {
     xfade_out: Vec<f32>,
 }
 
+#[derive(Clone, PartialEq, EnumString, Debug)]
+enum GrainStatus {
+    Off,
+    On,
+    XFade,
+}
+
 #[derive(Clone)]
 struct GrainParams {
     // On or off
-    status: bool,
+    status: GrainStatus,
     /// Mark the params as recently changed
     updated: bool,
     len: usize,
@@ -95,7 +104,6 @@ fn main() -> Result<()> {
         .collect();
 
     // Compute cross fading env
-    // Relying on jack freq being 48khz for 2ms xfade
     let buffer_len = min(SAMPLE_BUFFER_MAX_LEN, bits.len());
     let mut xfade_in: Vec<f32> = (0..XFADE_LEN).map(|i| (PI * i as f32 / 2. * XFADE_LEN as f32).sin()).collect::<Vec<f32>>();
     let mut xfade_out: Vec<f32> = (0..XFADE_LEN).map(|i| (PI * i as f32 / 2. * XFADE_LEN as f32).cos()).collect();
@@ -112,7 +120,7 @@ fn main() -> Result<()> {
 
     // Create the shared parameters instance
     let grain_params_arc = Arc::new(RwLock::new(GrainParams {
-        status: true,
+        status: GrainStatus::XFade,
         updated: false,
         start: 0,
         len: buffer.len,
@@ -144,10 +152,13 @@ fn main() -> Result<()> {
             let buffer_pos = grain_params_read.start + grain_pos % grain_len;
             // Stays at -1 until (end_of_grain - XFADE) is reached, wrapped
             let xfade_pos = (grain_pos.saturating_sub(grain_len - XFADE_LEN)) % grain_len + b_ref.len - 1;
+            let grain_status = &grain_params_read.status;
 
+            match grain_status {
+                GrainStatus::XFade => {
             out_l_buff[i] = 
             // Fade out from the end of the grain
-            // TODO could store last playes samples in a buffer of xfade_size to be used for fadeout? 
+            // TODO could store last played samples in a buffer of xfade_size to be used for fadeout? 
             // TODO cut to 0 crossinng
             b_ref.xfade_out[grain_pos % grain_len]
                 * b_ref.l_buffer[(buffer_pos + grain_len) % b_ref.len] + 
@@ -165,15 +176,27 @@ fn main() -> Result<()> {
                 + b_ref.xfade_in[grain_pos % grain_len]
                     * b_ref.r_buffer[buffer_pos % b_ref.len] * b_ref.xfade_out[(xfade_pos as usize + 1) % b_ref.len]
             + b_ref.xfade_in[xfade_pos as usize % b_ref.len] * b_ref.r_buffer[(b_ref.len + buffer_pos - grain_len) % b_ref.len];
+            }
+                GrainStatus::On => { out_l_buff[i] = 
+   
 
+
+                            b_ref.l_buffer[buffer_pos % b_ref.len] ;
+ 
+        
+                  
+                    out_r_buff[i] = 
+                  
+                        
+                            b_ref.r_buffer[buffer_pos % b_ref.len] ;},
+                GrainStatus::Off => {
+                    out_l_buff.fill(0.);
+                    out_r_buff.fill(0.);
+                }, }
 
         }
         params_ref.grain_head = (params_ref.grain_head + out_buff_len) % grain_len;
 
-        if !grain_params_read.status {
-            out_l_buff.fill(0.);
-            out_r_buff.fill(0.);
-        }
 
         jack::Control::Continue
     };
@@ -198,23 +221,20 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// TODO should not be able to fail, remove unwraps and return error obj to be catched & printed
-fn osc_handling(osc_msg: &OscMessage, params: &Params, buffer: &SampleBuffer) {
+fn osc_handling(osc_msg: &OscMessage, params: &Params, buffer: &SampleBuffer) -> Result<()>{
     match osc_msg.addr.as_str() {
         "/tadeusz/status" => {
-            if let Some(status) = osc_msg.args[0].to_owned().int() {
+            let status = osc_msg.args[0].to_owned().string().ok_or_else(||anyhow::format_err!("OSC status arg was not recognized."))?;
                 let mut grain_params_mut = params.grain.write().unwrap();
-                grain_params_mut.status = status == 1;
-                println!("Status set to {:?}", status == 1);
-            } else {
-                println!("OSC message argument is of wrong type.");
-            }
+                grain_params_mut.status = GrainStatus::from_str(&status)?;
+                println!("Grain Status set to {:?}", grain_params_mut.status);
         }
         "/tadeusz/params" => {
             let mut grain_params_mut = params.grain.write().unwrap();
-            if let Some(start) = osc_msg.args[0].to_owned().int()
-                && let Some(len) = osc_msg.args[1].to_owned().int() {
-                    if len > XFADE_LEN  as i32{
+            let start = osc_msg.args[0].to_owned().int().ok_or_else(||anyhow::format_err!("OSC start arg was not recognized."))?;
+            let len = osc_msg.args[1].to_owned().int().ok_or_else(||anyhow::format_err!("OSC len arg was not recognized."))?;
+
+                    if len > XFADE_LEN  as i32 {
                         grain_params_mut.start = min(start as usize, buffer.len);
                         grain_params_mut.len = min(len as usize, buffer.len);
                         println!("Grain start set to {:?}", grain_params_mut.start);
@@ -222,12 +242,10 @@ fn osc_handling(osc_msg: &OscMessage, params: &Params, buffer: &SampleBuffer) {
                     } else {
                         println!("OSC len message argument cannot be less than XFADE.");
                     }
-                }   else {
-                println!("OSC message argument is of wrong type.");
-            }
         }
-        _ => println!("OSC message routing is unrecognized."),
+        _ => bail!("OSC routing was not recognized"),
     }
+    Ok(())
 }
 
 /// Returns a closure that runs the main osc receiving loop
@@ -251,7 +269,10 @@ fn osc_process_closure(
                     match packet {
                         rosc::OscPacket::Message(msg) => {
                             println!("Received osc msg {:?}", msg);
-                            osc_handling(&msg, &params_ref, &buffer);
+                            let r = osc_handling(&msg, &params_ref, &buffer);
+                            if let Err(e) = r {
+                                println!("OSC message hnadling failed with: {:?}", e);
+                            }
                         }
                         rosc::OscPacket::Bundle(_) => unimplemented!(),
                     }

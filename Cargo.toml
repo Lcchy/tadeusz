@@ -10,3 +10,4 @@ jack = "0.10.0"
 anyhow = "1.0.58"
 rosc = "0.8.1"
 wav = "1.0.0"
+strum = { version = "0.24.1", features = ["derive"] }
