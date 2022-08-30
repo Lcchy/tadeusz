@@ -166,9 +166,9 @@ fn main() -> Result<()> {
                         // TODO could store last played samples in a buffer of xfade_size to be used for fadeout? 
                         // TODO cut to 0 crossinng
                         b_ref.xfade_out[grain_pos % grain_len]
-                            * b_ref.l_buffer[(buffer_pos + grain_len) % b_ref.len] +
+                            * b_ref.l_buffer[(buffer_pos + grain_len) % b_ref.len]
                         // Present grain
-                        b_ref.xfade_in[grain_pos % grain_len]
+                        + b_ref.xfade_in[grain_pos % grain_len]
                             * b_ref.l_buffer[buffer_pos % b_ref.len]
                             * b_ref.xfade_out[(xfade_pos as usize + 1) % b_ref.len]
                         // Fade in of next grain
