@@ -15,3 +15,4 @@
 - Granular synth slides: https://courses.cs.washington.edu/courses/cse490s/11au/lectures/G-Granular.pdf
 - Rust Sample rate conversion: https://github.com/HEnquist/rubato
 - Wiki Granular Synth: https://en.wikipedia.org/wiki/Granular_synthesis
+- Inspiration: https://www.hologramelectronics.com/microcosm
