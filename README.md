@@ -16,3 +16,5 @@
 - Rust Sample rate conversion: https://github.com/HEnquist/rubato
 - Wiki Granular Synth: https://en.wikipedia.org/wiki/Granular_synthesis
 - Inspiration: https://www.hologramelectronics.com/microcosm
+- https://llllllll.co/t/poly-grains-a-polyphonic-granular-synthesizer/33687
+- https://www.hansroels.be/abunch-eng.htm
